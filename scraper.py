@@ -2,9 +2,9 @@
 import asyncio
 import itertools as it
 import sqlite3
-from urllib.parse import urljoin
-import time
 import sys
+import time
+from urllib.parse import urljoin
 
 import aiohttp
 from lxml.html import document_fromstring as _parse_html
@@ -49,7 +49,7 @@ async def scrape_item(formats, category, item_url, list_url,
             list_url)
 
 
-async def scape_list(url, get):
+async def scrape_list(url, get):
     datasets = []
     while True:
         async with get(url) as list_resp:
@@ -61,12 +61,13 @@ async def scape_list(url, get):
         # so we're left with having to download the same page twice
         if '[Replication or Save Conflict]' in text:
             async with get(url + '&Collapse=') as list_resp:
-                text = await list_resp.text()
-            html = parse_html(text)
+                html = parse_html(await list_resp.text())
 
         datasets.extend([
-            (';'.join(i.text_content().strip() for i in
-                      r.xpath('.//*[starts-with(@class, "format-box")]')),
+            (';'.join(filter(None,
+                             (i.text_content().strip() for i in
+                              r.xpath('.//*[starts-with(@class, "format-box")]'))
+                             )) or None,
              r.xpath('string(.//*[@class = "datasetcat"])').strip(),
              r.xpath('string(.//a[@class = "datasethead"]/@href)'),
              url) for r in html.xpath('''\
@@ -84,7 +85,7 @@ async def gather_datasets(loop, get):
     sections = (urljoin(index_resp.url,
                         l.replace('location.href=', '').strip("'")) for l in
                 html.xpath('//div[@class = "AccordionPanelTab"]/a/@onclick'))
-    datasets = await asyncio.gather(*(scape_list(s, get) for s in sections),
+    datasets = await asyncio.gather(*(scrape_list(s, get) for s in sections),
                                     loop=loop)
     datasets = await asyncio.gather(*(scrape_item(*i, get) for i in
                                       it.chain.from_iterable(datasets)),
