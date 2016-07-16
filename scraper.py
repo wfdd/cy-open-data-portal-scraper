@@ -1,6 +1,5 @@
 
 import asyncio
-import itertools as it
 import sqlite3
 import sys
 import time
@@ -97,6 +96,8 @@ def main(loop):
     with aiohttp.ClientSession(loop=loop) as session, \
             sqlite3.connect('data.sqlite') as cursor:
         class Get:
+            event = asyncio.Event(loop=loop)
+            event.set()  # Flip the inital state to True
             semaphore = asyncio.Semaphore(8, loop=loop)
 
             def __init__(self, url):
@@ -105,23 +106,31 @@ def main(loop):
             async def __aenter__(self):
                 for i in range(3):
                     try:
+                        await self.event.wait()
                         async with self.semaphore:
                             self.resp = await session.get(self.url)
-                            # print('Fetched ' + self.resp.url)
+                            # print('{}: Fetched {!r}'
+                            #       .format(time.strftime('%H:%M:%S'), self.resp.url))
                             return self.resp
                     except aiohttp.errors.ClientResponseError as e:
-                        # Suppose we've been booted...
                         if i == 2:
                             raise       # Giving up after the third attempt
-                        print('Received ' + repr(e) + '.  Retrying in 5s',
-                              file=sys.stderr)
-                        # Pause everything.  We're not using asyncio.sleep cuz
-                        # all reqs are going to the same server and are probably
-                        # gonna be similarly rejected
-                        time.sleep(5)
+                        # Pausing all requests since they're all going to
+                        # the same server and are (probably) gonna be
+                        # similarly rejected
+                        await self._pause(e)
 
             async def __aexit__(self, *a):
                 self.resp.close()
+
+            @classmethod
+            async def _pause(cls, e):
+                if cls.event.is_set():  # Debounce repeated failures
+                    cls.event.clear()
+                    print('{}: Received {!r}.  Retrying in 5s'
+                          .format(time.strftime('%H:%M:%S'), e), file=sys.stderr)
+                    await asyncio.sleep(5, loop=loop)
+                    cls.event.set()
 
         cursor.execute('''\
 CREATE TABLE IF NOT EXISTS data
