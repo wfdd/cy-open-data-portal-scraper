@@ -78,17 +78,15 @@ async def scrape_list(url, get):
             return datasets
 
 
-async def gather_datasets(loop, get):
+async def gather_datasets(get):
     async with get(base_url) as index_resp:
         html = parse_html(await index_resp.text())
     sections = (urljoin(index_resp.url,
                         l.replace('location.href=', '').strip("'")) for l in
                 html.xpath('//div[@class = "AccordionPanelTab"]/a/@onclick'))
-    datasets = await asyncio.gather(*(scrape_list(s, get) for s in sections),
-                                    loop=loop)
-    datasets = await asyncio.gather(*(scrape_item(*i, get) for i in
-                                      it.chain.from_iterable(datasets)),
-                                    loop=loop)
+    datasets = await get.gather(scrape_list(s, get) for s in sections)
+    datasets = await get.gather(scrape_item(*i, get)
+                                for l in datasets for i in l)
     return datasets
 
 
@@ -132,6 +130,10 @@ def main(loop):
                     await asyncio.sleep(5, loop=loop)
                     cls.event.set()
 
+            @staticmethod
+            async def gather(iterable):
+                return await asyncio.gather(*iterable, loop=loop)
+
         cursor.execute('''\
 CREATE TABLE IF NOT EXISTS data
 (title, formats, category, source, fee, degree_to_which_processed, date_added,
@@ -139,7 +141,7 @@ CREATE TABLE IF NOT EXISTS data
  government_contact, email, item_url, list_url, UNIQUE (item_url))''')
         cursor.executemany('''\
 INSERT OR REPLACE INTO data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            loop.run_until_complete(gather_datasets(loop, Get)))
+            loop.run_until_complete(gather_datasets(Get)))
 
 if __name__ == '__main__':
     main(uvloop.new_event_loop())
