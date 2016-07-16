@@ -87,7 +87,9 @@ async def gather_datasets(get):
     datasets = await get.gather(scrape_list(s, get) for s in sections)
     datasets = await get.gather(scrape_item(*i, get)
                                 for l in datasets for i in l)
-    return datasets
+    return int(html.xpath('string(//span[contains(string(.), "datasets")])')
+               .replace('datasets', '').strip()), \
+           datasets
 
 
 def main(loop):
@@ -134,6 +136,7 @@ def main(loop):
             async def gather(iterable):
                 return await asyncio.gather(*iterable, loop=loop)
 
+        dataset_count, datasets = loop.run_until_complete(gather_datasets(Get))
         cursor.execute('''\
 CREATE TABLE IF NOT EXISTS data
 (title, formats, category, source, fee, degree_to_which_processed, date_added,
@@ -141,7 +144,12 @@ CREATE TABLE IF NOT EXISTS data
  government_contact, email, item_url, list_url, UNIQUE (item_url))''')
         cursor.executemany('''\
 INSERT OR REPLACE INTO data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            loop.run_until_complete(gather_datasets(Get)))
+            datasets)
+
+        datasets_in_db, = cursor.execute('SELECT count(*) FROM data').fetchone()
+        if datasets_in_db != dataset_count:
+            print('Scraped {} datasets though {} are reported to exist'
+                  .format(datasets_in_db, dataset_count), file=sys.stderr)
 
 if __name__ == '__main__':
     main(uvloop.new_event_loop())
