@@ -1,11 +1,10 @@
 
 import asyncio
 import sqlite3
-import sys
-import time
-from urllib.parse import urljoin
+from urllib.parse import urlparse, urljoin
 
 import aiohttp
+from logbook import StderrHandler as StderrLogger, error, notice
 from lxml.html import document_fromstring as _parse_html
 import uvloop
 
@@ -59,6 +58,7 @@ async def scrape_list(url, get):
         # but it also messes up the pagination (because why wouldn't it),
         # so we're left with having to download the same page twice
         if '[Replication or Save Conflict]' in text:
+            notice("'[Replication or Save Conflict]' in {}", url)
             async with get(url + '&Collapse=') as list_resp:
                 html = parse_html(await list_resp.text())
 
@@ -94,7 +94,8 @@ async def gather_datasets(get):
 
 def main(loop):
     with aiohttp.ClientSession(loop=loop) as session, \
-            sqlite3.connect('data.sqlite') as cursor:
+            sqlite3.connect('data.sqlite') as cursor, \
+            StderrLogger():
         class Get:
             event = asyncio.Event(loop=loop)
             event.set()  # Flip the inital state to True
@@ -105,12 +106,10 @@ def main(loop):
 
             async def __aenter__(self):
                 for i in range(3):
+                    await self.event.wait()
                     try:
-                        await self.event.wait()
                         async with self.semaphore:
                             self.resp = await session.get(self.url)
-                            # print('{}: Fetched {!r}'
-                            #       .format(time.strftime('%H:%M:%S'), self.resp.url))
                             return self.resp
                     except aiohttp.errors.ClientResponseError as e:
                         if i == 2:
@@ -127,8 +126,7 @@ def main(loop):
             async def _pause(cls, e):
                 if cls.event.is_set():  # Debounce repeated failures
                     cls.event.clear()
-                    print('{}: Received {!r}.  Retrying in 5s'
-                          .format(time.strftime('%H:%M:%S'), e), file=sys.stderr)
+                    error('Received {!r}.  Retrying in 5s', e)
                     await asyncio.sleep(5, loop=loop)
                     cls.event.set()
 
@@ -148,8 +146,9 @@ INSERT OR REPLACE INTO data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 
         datasets_in_db, = cursor.execute('SELECT count(*) FROM data').fetchone()
         if datasets_in_db != dataset_count:
-            print('Scraped {} datasets though {} are reported to exist'
-                  .format(datasets_in_db, dataset_count), file=sys.stderr)
+            notice('Scraped {} datasets in total'
+                   ' though {} are reported to exist',
+                   datasets_in_db, dataset_count)
 
 if __name__ == '__main__':
     main(uvloop.new_event_loop())
