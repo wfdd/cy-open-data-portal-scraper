@@ -2,6 +2,7 @@
 import asyncio
 import sqlite3
 from urllib.parse import urlparse, urljoin
+from uuid import UUID
 
 import aiohttp
 from logbook import StderrHandler as StderrLogger, error, notice
@@ -39,7 +40,9 @@ async def scrape_item(formats, category, item_url, list_url,
                       get):
     async with get(item_url) as item_resp:
         html = parse_html(await item_resp.text())
-    return (html.xpath('string(//*[@class = "datasethead"])').strip(),
+    return (UUID(hex=urlparse(item_url).path.rpartition('/')[-1],
+                 version=4).hex,
+            html.xpath('string(//*[@class = "datasethead"])').strip(),
             formats,
             category,
             *extract_metadata(html),
@@ -94,7 +97,7 @@ async def gather_datasets(get):
 
 def main(loop):
     with aiohttp.ClientSession(loop=loop) as session, \
-            sqlite3.connect('data.sqlite') as cursor, \
+            sqlite3.connect('data.sqlite') as conn, \
             StderrLogger():
         class Get:
             event = asyncio.Event(loop=loop)
@@ -135,16 +138,16 @@ def main(loop):
                 return await asyncio.gather(*iterable, loop=loop)
 
         dataset_count, datasets = loop.run_until_complete(gather_datasets(Get))
-        cursor.execute('''\
+        conn.execute('''\
 CREATE TABLE IF NOT EXISTS data
-(title, formats, category, source, fee, degree_to_which_processed, date_added,
- license, update_frequency, reporting_period, geographic_coverage,
- government_contact, email, item_url, list_url, UNIQUE (item_url))''')
-        cursor.executemany('''\
-INSERT OR REPLACE INTO data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            datasets)
+(id, title, formats, category, source, fee, degree_to_which_processed,
+ date_added, license, update_frequency, reporting_period, geographic_coverage,
+ government_contact, email, item_url, list_url, UNIQUE (id))''')
+        conn.executemany('''\
+INSERT OR REPLACE INTO data VALUES
+(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', datasets)
 
-        datasets_in_db, = cursor.execute('SELECT count(*) FROM data').fetchone()
+        datasets_in_db, = conn.execute('SELECT count(*) FROM data').fetchone()
         if datasets_in_db != dataset_count:
             notice('Scraped {} datasets in total'
                    ' though {} are reported to exist',
