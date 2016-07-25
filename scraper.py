@@ -14,7 +14,7 @@ base_url = 'http://www.data.gov.cy/'
 labels = (('Πηγή Ενημέρωσης:', 'source'),
           ('Χρέωση:', 'fee'),
           ('Επίπεδο Επεξεργασίας:', 'degree_to_which_processed'),
-          ('Προστέθηκε στο data.gov.cy:', 'date_added'),
+          ('Προστέθηκε στο data.gov.cy:', 'date_first_added'),
           ('Άδεια Χρήσης:', 'license'),
           ('Συχνότητα Επικαιροποίησης:', 'update_frequency'),
           ('Περίοδος Αναφοράς:', 'reporting_period'),
@@ -141,7 +141,7 @@ def main(loop):
         conn.execute('''\
 CREATE TABLE IF NOT EXISTS data
 (id, title, formats, category, source, fee, degree_to_which_processed,
- date_added, license, update_frequency, reporting_period, geographic_coverage,
+ date_first_added, license, update_frequency, reporting_period, geographic_coverage,
  government_contact, email, item_url, list_url, UNIQUE (id))''')
         conn.executemany('''\
 INSERT OR REPLACE INTO data VALUES
