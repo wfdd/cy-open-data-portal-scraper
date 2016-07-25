@@ -1,5 +1,6 @@
 
 import asyncio
+from datetime import datetime as dt
 import sqlite3
 from urllib.parse import urlparse, urljoin
 from uuid import UUID
@@ -95,58 +96,66 @@ async def gather_datasets(get):
            datasets
 
 
+def prepare_getter(loop, session):
+    class Get:
+        event = asyncio.Event(loop=loop)
+        event.set()  # Flip the inital state to True
+        semaphore = asyncio.Semaphore(8, loop=loop)
+
+        def __init__(self, url):
+            self.url = url
+
+        async def __aenter__(self):
+            for i in range(3):
+                await self.event.wait()
+                try:
+                    async with self.semaphore:
+                        self.resp = await session.get(self.url)
+                        return self.resp
+                except aiohttp.errors.ClientResponseError as e:
+                    if i == 2:
+                        raise       # Giving up after the third attempt
+                    # Pausing all requests since they're all going to
+                    # the same server and are (probably) gonna be
+                    # similarly rejected
+                    await self._pause(e)
+
+        async def __aexit__(self, *a):
+            self.resp.close()
+
+        @classmethod
+        async def _pause(cls, e):
+            if cls.event.is_set():  # Debounce repeated failures
+                cls.event.clear()
+                error('Received {!r}.  Retrying in 5s', e)
+                await asyncio.sleep(5, loop=loop)
+                cls.event.set()
+
+        @staticmethod
+        async def gather(iterable):
+            return await asyncio.gather(*iterable, loop=loop)
+
+    return Get
+
+
 def main(loop):
-    with aiohttp.ClientSession(loop=loop) as session, \
-            sqlite3.connect('data.sqlite') as conn, \
-            StderrLogger():
-        class Get:
-            event = asyncio.Event(loop=loop)
-            event.set()  # Flip the inital state to True
-            semaphore = asyncio.Semaphore(8, loop=loop)
+    with StderrLogger(), \
+            aiohttp.ClientSession(loop=loop) as session, \
+            sqlite3.connect('data.sqlite') as conn:
+        dataset_count, datasets = loop.run_until_complete(
+            gather_datasets(prepare_getter(loop, session)))
 
-            def __init__(self, url):
-                self.url = url
-
-            async def __aenter__(self):
-                for i in range(3):
-                    await self.event.wait()
-                    try:
-                        async with self.semaphore:
-                            self.resp = await session.get(self.url)
-                            return self.resp
-                    except aiohttp.errors.ClientResponseError as e:
-                        if i == 2:
-                            raise       # Giving up after the third attempt
-                        # Pausing all requests since they're all going to
-                        # the same server and are (probably) gonna be
-                        # similarly rejected
-                        await self._pause(e)
-
-            async def __aexit__(self, *a):
-                self.resp.close()
-
-            @classmethod
-            async def _pause(cls, e):
-                if cls.event.is_set():  # Debounce repeated failures
-                    cls.event.clear()
-                    error('Received {!r}.  Retrying in 5s', e)
-                    await asyncio.sleep(5, loop=loop)
-                    cls.event.set()
-
-            @staticmethod
-            async def gather(iterable):
-                return await asyncio.gather(*iterable, loop=loop)
-
-        dataset_count, datasets = loop.run_until_complete(gather_datasets(Get))
+        now = dt.now().isoformat()
         conn.execute('''\
 CREATE TABLE IF NOT EXISTS data
 (id, title, formats, category, source, fee, degree_to_which_processed,
- date_first_added, license, update_frequency, reporting_period, geographic_coverage,
- government_contact, email, item_url, list_url, UNIQUE (id))''')
+ date_first_added, license, update_frequency, reporting_period,
+ geographic_coverage, government_contact, email, item_url, list_url,
+ meta__last_updated, UNIQUE (id))''')
         conn.executemany('''\
 INSERT OR REPLACE INTO data VALUES
-(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', datasets)
-
+(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (d + (now,) for d in datasets))
         datasets_in_db, = conn.execute('SELECT count(*) FROM data').fetchone()
         if datasets_in_db != dataset_count:
             notice('Scraped {} datasets in total'
