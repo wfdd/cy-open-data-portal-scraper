@@ -123,13 +123,12 @@ def prepare_getter(loop, session):
         async def __aexit__(self, *a):
             self.resp.close()
 
-        @classmethod
-        async def _pause(cls, e):
-            if cls.event.is_set():  # Debounce repeated failures
-                cls.event.clear()
-                error('Received {!r}.  Retrying in 5s', e)
+        async def _pause(self, e):
+            if self.event.is_set():  # Debounce repeated failures
+                self.event.clear()
+                error('Received {!r} on {}.  Retrying in 5s', e, self.url)
                 await asyncio.sleep(5, loop=loop)
-                cls.event.set()
+                self.event.set()
 
         @staticmethod
         async def gather(iterable):
