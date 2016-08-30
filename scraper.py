@@ -1,54 +1,59 @@
 
 import asyncio
-from datetime import datetime as dt
+from datetime import datetime
 import sqlite3
 from urllib.parse import urlparse, urljoin
 from uuid import UUID
 
 import aiohttp
 from logbook import StderrHandler as StderrLogger, error, notice
-from lxml.html import document_fromstring as _parse_html
+from lxml.html import document_fromstring
 import uvloop
 
 base_url = 'http://www.data.gov.cy/'
 
 labels = (('Πηγή Ενημέρωσης:', 'source'),
           ('Χρέωση:', 'fee'),
-          ('Επίπεδο Επεξεργασίας:', 'degree_to_which_processed'),
-          ('Προστέθηκε στο data.gov.cy:', 'date_first_added'),
+          ('Επίπεδο Επεξεργασίας:', 'processing_level'),
+          ('Προστέθηκε στο data.gov.cy:', 'release_date'),
           ('Άδεια Χρήσης:', 'license'),
           ('Συχνότητα Επικαιροποίησης:', 'update_frequency'),
           ('Περίοδος Αναφοράς:', 'reporting_period'),
           ('Γεωγραφική Κάλυψη:', 'geographic_coverage'),
-          ('Σύνδεσμος Επικοινωνίας:', 'government_contact'),
-          ('e-mail:', 'email'),)
+          ('Σύνδεσμος Επικοινωνίας:', 'contact_point/name'),
+          ('e-mail:', 'contact_point/email'),)
+fields = ('identifier',
+          'title',
+          'url',
+          'formats',
+          'tag',
+          *(l for _, l in labels),
+          'meta__list_url',
+          'meta__last_updated')
+
+loop = uvloop.new_event_loop()
 
 
 def parse_html(text):
-    html = _parse_html(text
-                       .replace('<?xml version="1.0" encoding="UTF-8"?>', ''))
+    html = document_fromstring(text.replace('<?xml version="1.0" encoding="UTF-8"?>', ''))
     html.make_links_absolute(base_url)
     return html
 
 
-def extract_metadata(html):
-    for label, _ in labels:
-        yield html.xpath('string(//b[text() = "{}"]/..)'
-                         .format(label)).replace(label, '').strip() or None
-
-
-async def scrape_item(formats, category, item_url, list_url,
+async def scrape_item(formats, tag, item_url, list_url,
                       get):
     async with get(item_url) as item_resp:
         html = parse_html(await item_resp.text())
-    return (UUID(hex=urlparse(item_url).path.rpartition('/')[-1],
-                 version=4).hex,
-            html.xpath('string(//*[@class = "datasethead"])').strip(),
-            formats,
-            category,
-            *extract_metadata(html),
-            item_url,
-            list_url)
+    return {'identifier': UUID(hex=urlparse(item_url).path.rpartition('/')[-1],
+                               version=4).hex,
+            'title': html.xpath('string(//*[@class = "datasethead"])').strip(),
+            'url': item_url,
+            'formats': formats,
+            'tag': tag,
+            **{f: (html.xpath('string(//b[text() = "{}"]/..)'
+                              .format(l)).replace(l, '').strip() or None)
+               for l, f in labels},
+            'meta__list_url': list_url}
 
 
 async def scrape_list(url, get):
@@ -91,9 +96,10 @@ async def gather_datasets(get):
     datasets = await get.gather(scrape_list(s, get) for s in sections)
     datasets = await get.gather(scrape_item(*i, get)
                                 for l in datasets for i in l)
-    return int(html.xpath('string(//span[contains(string(.), "datasets")])')
-               .replace('datasets', '').strip()), \
-           datasets
+    return (int(html.xpath('string(//span[contains(string(.), "datasets")])')
+                   .replace('datasets', '')
+                   .strip()),
+            datasets)
 
 
 def prepare_getter(loop, session):
@@ -113,7 +119,7 @@ def prepare_getter(loop, session):
                         self.resp = await session.get(self.url)
                         return self.resp
                 except aiohttp.errors.ClientResponseError as e:
-                    if i == 2:
+                    if i == 3:
                         raise       # Giving up after the third attempt
                     # Pausing all requests since they're all going to
                     # the same server and are (probably) gonna be
@@ -137,29 +143,27 @@ def prepare_getter(loop, session):
     return Get
 
 
-def main(loop):
+def main():
     with StderrLogger(), \
             aiohttp.ClientSession(loop=loop) as session, \
             sqlite3.connect('data.sqlite') as conn:
-        dataset_count, datasets = loop.run_until_complete(
-            gather_datasets(prepare_getter(loop, session)))
-
-        now = dt.now().isoformat()
+        reported_total, datasets = loop\
+            .run_until_complete(gather_datasets(prepare_getter(loop, session)))
+        now = datetime.now().isoformat()
         conn.execute('''\
 CREATE TABLE IF NOT EXISTS data
-(id, title, formats, category, source, fee, degree_to_which_processed,
- date_first_added, license, update_frequency, reporting_period,
- geographic_coverage, government_contact, email, item_url, list_url,
- meta__last_updated, UNIQUE (id))''')
-        conn.executemany('''\
-INSERT OR REPLACE INTO data VALUES
-(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (d + (now,) for d in datasets))
-        datasets_in_db, = conn.execute('SELECT count(*) FROM data').fetchone()
-        if datasets_in_db != dataset_count:
-            notice('Scraped {} datasets in total'
-                   ' though {} are reported to exist',
-                   datasets_in_db, dataset_count)
+(identifier UNIQUE, title, url, formats, tag, source, fee, processing_level,
+ release_date, license, update_frequency, reporting_period,
+ geographic_coverage, 'contact_point/name', 'contact_point/email',
+ meta__list_url, meta__last_updated)''')
+        insert_total = conn.executemany('''\
+INSERT OR REPLACE INTO data
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            ((*(i for _, i in sorted(d.items(),
+                                     key=lambda i: fields.index(i[0]))), now)
+             for d in datasets)).rowcount
+        notice('Inserted {} datasets; {} are reported to exist',
+               insert_total, reported_total)
 
 if __name__ == '__main__':
-    main(uvloop.new_event_loop())
+    main()
